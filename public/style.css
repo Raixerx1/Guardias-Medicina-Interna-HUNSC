@@ -7,6 +7,16 @@
 .photo-preview{display:block;max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px}.photo-preview#photo-canvas{cursor:crosshair}.date-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px}.login form+a{display:inline-block;margin-top:14px;color:var(--teal)}
 
 .mobile-nav{display:none}
+.position-filter{margin-bottom:14px}
+.position-filter select{min-height:44px}
+.calendar-filtered .day{min-width:0;align-content:start;min-height:62px}
+.calendar-filtered .day-mark{margin-top:3px}
+.calendar-filtered .day-mark span{margin-top:0;line-height:1.15;overflow-wrap:anywhere}
+.calendar-filtered .day-person-wide,.calendar-filtered .day-person-compact{overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.calendar-filtered .day-person-wide{display:-webkit-box}
+.calendar-filtered .day-person-compact{display:none}
+.day-turn-group h3{font-size:.92rem;margin-top:10px;color:var(--muted)}
+.day-turn-group+.day-turn-group{border-top:1px solid var(--line);margin-top:8px;padding-top:5px}
 .content,.top>div,.row>div,.stack>*,form>*,label{min-width:0}
 .content,.mobile-menu{overflow-wrap:anywhere}
 .date-fields{grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr))}
@@ -17,6 +27,8 @@ input[type=date]::-webkit-date-and-time-value{text-align:left}
 dialog{max-height:calc(100dvh - 32px);overflow:auto}
 
 @media (max-width:760px) {
+  .calendar-filtered .day-person-wide{display:none}
+  .calendar-filtered .day-person-compact{display:-webkit-box}
   html{scroll-padding-bottom:calc(74px + env(safe-area-inset-bottom,0px))}
   .shell{display:block;min-height:100dvh}
   .sidebar{

@@ -3,7 +3,7 @@ import {photoDates,readPhoto} from '/ocr.js';
 const root = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const toast = document.querySelector('#toast');
-const names = {HUNSC_1:'HUNSC 1ª',HUNSC_2:'HUNSC 2ª',EAP:'EAP',HSUR:'H. Sur',REF_HUNSC:'Refuerzo HUNSC',REF_HSUR:'Refuerzo H. Sur'};
+const names = {HUNSC_1:'HUNSC · 1.ª línea',HUNSC_2:'HUNSC · 2.ª línea',EAP:'EAP',HSUR:'Hospital del Sur',REF_HUNSC:'Refuerzo HUNSC',REF_HSUR:'Refuerzo Hospital del Sur'};
 const statuses = {requested:'Pendiente del compañero',accepted:'Pendiente de coordinación',applied:'Aplicado',rejected:'Rechazado',cancelled:'Cancelado',invalidated:'Invalidado'};
 const isRef = position => position.startsWith('REF_');
 const slot = row => row.date+'/'+row.position;
@@ -14,6 +14,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;',
 let session, state, tab='service', selected=today, month=today.slice(0,7), stale=false, noticeTimer, invite=null, loaded=false;
 let profileSave=0, savingProfile=false;
 let sharedLink=null, photo=null, photoDraft=null;
+let servicePosition='';
 const brand = '<div class="brand"><img src="/icon.svg" alt=""><div>GuardiaMI<small>Medicina Interna</small></div></div>';
 function message(text) {
   clearTimeout(noticeTimer);
@@ -73,7 +74,8 @@ function profile() {
     '<p class="muted">Usa al menos 14 caracteres. Si cambias el correo o la contraseña, se cerrarán tus otras sesiones.</p><div><button class="btn primary">Guardar contraseña</button></div></form></section>':'')+'</div>';
 }
 function rowsFor(date) {
-  return state.assignments.filter(a=>a.date===date && (tab!=='mine'||a.physicianId===state.me.id));
+  return state.assignments.filter(a=>a.date===date &&
+    (tab==='mine'?a.physicianId===state.me.id:!servicePosition||a.position===servicePosition));
 }
 function restsFor(date) {
   return tab==='mine' ? state.rests.filter(r=>r.date===date&&r.physicianId===state.me.id) : [];
@@ -83,23 +85,51 @@ function rowHtml(row) {
   return '<div class="row line"><div><strong>'+names[row.position]+'</strong><p>'+name(row.physicianId)+' · '+(ref?'08:00–20:00':'08:00–08:00 (+1 día)')+'</p></div><span class="tag '+(ref?'ref':'')+'">'+(ref?'12 h':'24 h')+'</span>'+
     (state.me.id===row.physicianId?'<button class="btn" data-change="'+slot(row)+'">Pedir cambio</button>':'')+'</div>';
 }
+function positionFilter() {
+  const options=Object.entries(names);
+  const group=(label,reforcements)=>'<optgroup label="'+label+'">'+options.filter(([position])=>isRef(position)===reforcements)
+    .map(([position,label])=>'<option value="'+position+'" '+(servicePosition===position?'selected':'')+'>'+label+'</option>').join('')+'</optgroup>';
+  return '<label class="position-filter" for="service-position">Puesto en el calendario<select id="service-position">'+
+    '<option value="">Todos los puestos</option>'+group('Guardias · 24 h',false)+group('Refuerzos · 12 h',true)+'</select></label>';
+}
+function calendarMark(rows,rests,filtered) {
+  if (tab==='mine') return [rows.length&&rows.length+' T',rests&&'S'].filter(Boolean).join(' · ');
+  if (!filtered) return rows.length?rows.length+'/6':'';
+  if (!rows.length) return '';
+  const full=state.people[rows[0].physicianId]?.name ?? rows[0].physicianId;
+  const words=full.trim().split(/\s+/);
+  const short=words.length>1?Array.from(words[0])[0]+'. '+words.at(-1):words[0];
+  return '<span class="day-person-wide">'+escape(full)+'</span><span class="day-person-compact">'+escape(short)+'</span>';
+}
+function dailyAssignments(assignments,filtered) {
+  if (tab==='mine'||filtered) return assignments.map(rowHtml).join('');
+  return [['Guardias',false],['Refuerzos',true]].map(([label,reinforcements])=>{
+    const rows=assignments.filter(row=>isRef(row.position)===reinforcements);
+    return rows.length?'<section class="day-turn-group"><h3>'+label+'</h3>'+rows.map(rowHtml).join('')+'</section>':'';
+  }).join('');
+}
 function calendar() {
   const [year,num]=month.split('-').map(Number);
   const first=new Date(Date.UTC(year,num-1,1));
   const offset=(first.getUTCDay()+6)%7;
   const count=new Date(Date.UTC(year,num,0)).getUTCDate();
+  const filtered=tab==='service' && servicePosition;
   const cells=Array.from({length:offset},()=>'<span></span>');
   for(let i=1;i<=count;i++){
     const date=month+'-'+String(i).padStart(2,'0');
-    const rows=rowsFor(date).length, rests=restsFor(date).length;
-    const mark=tab==='mine' ? [rows&&rows+' T',rests&&'S'].filter(Boolean).join(' · ') : rows?rows+'/6':'';
-    cells.push('<button class="day '+(date===today?'today':'')+'" data-date="'+date+'" aria-label="'+long(date)+(rows?', '+rows+' turnos':'')+(rests?', saliente':'')+'" aria-pressed="'+(date===selected)+'">'+i+'<span>'+mark+'</span></button>');
+    const rows=rowsFor(date), rests=restsFor(date).length;
+    const description=filtered?(rows.length?names[filtered]+' · '+name(rows[0].physicianId):'Sin turno publicado para '+names[filtered]):
+      (rows.length?rows.length+' '+(rows.length===1?'turno':'turnos'):'');
+    const label=long(date)+(description?', '+description:'')+(rests?', saliente':'');
+    cells.push('<button class="day '+(date===today?'today':'')+'" data-date="'+date+'" aria-label="'+label+'" '+(filtered&&rows.length?'title="'+description+'" ':'')+'aria-pressed="'+(date===selected)+'">'+i+
+      '<span class="day-mark">'+calendarMark(rows,rests,filtered)+'</span></button>');
   }
   const assignments=rowsFor(selected).sort((a,b)=>Object.keys(names).indexOf(a.position)-Object.keys(names).indexOf(b.position));
   const rests=restsFor(selected);
-  return '<div class="layout"><section class="card"><div class="bar"><h2>'+fmt(month+'-01',{month:'long',year:'numeric'})+'</h2><div class="actions"><button class="btn" data-month="-1" aria-label="Mes anterior">‹</button><button class="btn" data-today>Hoy</button><button class="btn" data-month="1" aria-label="Mes siguiente">›</button></div></div><div class="calendar">'+['Lu','Ma','Mi','Ju','Vi','Sá','Do'].map(d=>'<span class="dow">'+d+'</span>').join('')+cells.join('')+'</div>'+(tab==='mine'?'<p class="day-label">T · Turno &nbsp; S · Saliente</p>':'')+'</section>'+
-    '<section class="card"><h2>'+ (tab==='mine'?'Mi agenda':'Puestos del día')+'</h2><p class="day-label">'+long(selected)+'</p>'+assignments.map(rowHtml).join('')+rests.map(r=>'<div class="row"><span class="tag rest">Saliente</span><p>'+r.sources.map(s=>names[s.position]+' · '+fmt(s.date,{day:'numeric',month:'short'})).join(' / ')+'</p></div>').join('')+
-    (!assignments.length&&!rests.length?'<p class="empty">'+(tab==='mine'?'Sin turnos ni salientes ese día.':'Sin cuadrante publicado para ese día.')+'</p>':'')+'</section></div>';
+  return '<div class="layout"><section class="card"><div class="bar"><h2>'+fmt(month+'-01',{month:'long',year:'numeric'})+'</h2><div class="actions"><button class="btn" data-month="-1" aria-label="Mes anterior">‹</button><button class="btn" data-today>Hoy</button><button class="btn" data-month="1" aria-label="Mes siguiente">›</button></div></div>'+
+    (tab==='service'?positionFilter():'')+'<div class="calendar '+(filtered?'calendar-filtered':'')+'">'+['Lu','Ma','Mi','Ju','Vi','Sá','Do'].map(d=>'<span class="dow">'+d+'</span>').join('')+cells.join('')+'</div>'+(tab==='mine'?'<p class="day-label">T · Turno &nbsp; S · Saliente</p>':'')+'</section>'+
+    '<section class="card"><h2>'+ (tab==='mine'?'Mi agenda':filtered?'Turno del día':'Puestos del día')+'</h2><p class="day-label">'+long(selected)+'</p>'+dailyAssignments(assignments,filtered)+rests.map(r=>'<div class="row"><span class="tag rest">Saliente</span><p>'+r.sources.map(s=>names[s.position]+' · '+fmt(s.date,{day:'numeric',month:'short'})).join(' / ')+'</p></div>').join('')+
+    (!assignments.length&&!rests.length?'<p class="empty">'+(tab==='mine'?'Sin turnos ni salientes ese día.':filtered?'Sin turno publicado para '+names[filtered]+' ese día.':'Sin cuadrante publicado para ese día.')+'</p>':'')+'</section></div>';
 }
 function requests() {
   return '<section class="card compact"><div class="stack">'+(state.changes.length?state.changes.map(c=>{
@@ -160,6 +190,12 @@ function clearPhotoDraft() {
   photoDraft=null;
 }
 root.addEventListener('change',async event=>{
+  if(event.target.id==='service-position'){
+    servicePosition=Object.hasOwn(names,event.target.value)?event.target.value:'';
+    render();
+    document.querySelector('#service-position')?.focus({preventScroll:true});
+    return;
+  }
   const form=event.target.form;
   if(form?.id!=='photo-import') return;
   if(event.target.name!=='image'){if(photo) paintPhoto(form);return;}
