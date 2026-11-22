@@ -10,6 +10,7 @@ const long = date => fmt(date,{weekday:'long',day:'numeric',month:'long',year:'n
 const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'Atlantic/Canary'}).format(new Date());
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let session, state, tab='service', selected=today, month=today.slice(0,7), stale=false, noticeTimer, invite=null, loaded=false;
+let profileSave=0, savingProfile=false;
 const brand = '<div class="brand"><img src="/icon.svg" alt=""><div>GuardiaMI<small>Medicina Interna</small></div></div>';
 function message(text) {
   clearTimeout(noticeTimer);
@@ -23,8 +24,11 @@ async function api(path,body) {
   return data;
 }
 async function refresh({force=false}={}) {
+  const started=profileSave;
+  if (savingProfile && !force) return;
   try {
     const next=await api('state');
+    if (started!==profileSave) return;
     const old=state;
     const wasStale=stale;
     stale=false;
@@ -36,8 +40,10 @@ async function refresh({force=false}={}) {
         month=selected.slice(0,7);
       }
     }
-    if (force || wasStale || (JSON.stringify(old)!==JSON.stringify(next) && !dialog.open && !['import','invite'].includes(tab))) render();
+    if (force || (wasStale && tab!=='profile') || (JSON.stringify(old)!==JSON.stringify(next) && !dialog.open && !['import','invite','profile'].includes(tab))) render();
+    if (wasStale && tab==='profile' && !force) document.querySelector('#connection')?.setAttribute('hidden','');
   } catch(error) {
+    if (started!==profileSave) return;
     if (error.status===401) {
       session.me=null; state=null; loaded=false; render(); return;
     }
@@ -48,6 +54,20 @@ async function refresh({force=false}={}) {
   }
 }
 function name(id) { return escape(state.people[id]?.name ?? id); }
+function profile() {
+  const {name,email,hasPassword}=state.me;
+  const current='<label>Contraseña actual<input type="password" name="currentPassword" autocomplete="current-password" maxlength="128" required></label>';
+  const emailField='<input type="email" name="email" autocomplete="username" maxlength="254" value="'+escape(email)+'" '+(hasPassword?'required':'readonly')+'>';
+  return '<div class="stack compact">'+
+    '<section class="card"><h2 class="headspace">Nombre visible</h2><form id="profile-name"><label>Nombre y apellidos<input name="name" autocomplete="name" maxlength="100" value="'+escape(name)+'" required></label><div><button class="btn primary">Guardar nombre</button></div></form></section>'+
+    '<section class="card"><h2 class="headspace">Correo de acceso</h2>'+
+    (hasPassword?'<form id="profile-email"><label>Correo electrónico'+emailField+'</label>'+current+'<p class="muted">La próxima vez que entres, usa el correo nuevo.</p><div><button class="btn primary">Guardar correo</button></div></form>':
+    '<label>Correo electrónico'+emailField+'</label><p class="muted">Esta cuenta de demostración no tiene contraseña.</p>')+'</section>'+
+    (hasPassword?'<section class="card"><h2 class="headspace">Cambiar contraseña</h2><form id="profile-password">'+current+
+    '<label>Nueva contraseña<input type="password" name="password" autocomplete="new-password" minlength="14" maxlength="128" required></label>'+
+    '<label>Repite la nueva contraseña<input type="password" name="confirmPassword" autocomplete="new-password" minlength="14" maxlength="128" required></label>'+
+    '<p class="muted">Usa al menos 14 caracteres. Si cambias el correo o la contraseña, se cerrarán tus otras sesiones.</p><div><button class="btn primary">Guardar contraseña</button></div></form></section>':'')+'</div>';
+}
 function rowsFor(date) {
   return state.assignments.filter(a=>a.date===date && (tab!=='mine'||a.physicianId===state.me.id));
 }
@@ -130,9 +150,10 @@ function render() {
   if (!state) return;
   const nav={service:'Servicio',mine:'Mi calendario',request:'Solicitudes',notifications:'Avisos'};
   if(state.me.role==='coord') Object.assign(nav,{import:'Importar',invite:'Invitaciones',history:'Historial'});
+  nav.profile='Mi perfil';
   if(!nav[tab]) tab='service';
   const pending=state.notifications.filter(n=>!n.read).length;
-  const views={service:calendar,mine:calendar,request:requests,notifications,import:imports,invite:invitations,history};
+  const views={service:calendar,mine:calendar,request:requests,notifications,import:imports,invite:invitations,history,profile};
   root.innerHTML='<div class="shell"><aside class="sidebar">'+brand+'<nav class="nav" aria-label="Secciones">'+Object.entries(nav).map(([k,v])=>'<button data-tab="'+k+'" '+(tab===k?'aria-current="page"':'')+'>'+v+(k==='notifications'&&pending?' ('+pending+')':'')+'</button>').join('')+'</nav><p class="session">'+escape(state.me.name)+'</p><button class="signout" data-logout>Salir</button></aside>'+
     '<main class="content"><header class="top"><div><h1>'+nav[tab]+'</h1><p class="muted">'+escape(state.me.name)+'</p></div>'+(session.demo?'<span class="pill">Datos ficticios</span>':'')+'</header><p id="connection" class="banner" '+(stale?'':'hidden')+'>Sin conexión con el calendario. Los datos pueden estar desactualizados.</p>'+views[tab]()+'</main></div>';
 }
@@ -215,6 +236,19 @@ root.addEventListener('submit',async event=>{
     if(form.id==='setup') await setSession('setup',{...data,token:location.hash.slice(7)});
     if(form.id==='upload'){if(data.file.size>750000) throw new Error('El archivo supera el límite.');await api('imports',JSON.parse(await data.file.text()));await refresh({force:true});message('Borrador importado.');}
     if(form.id==='invite'){invite=await api('invite',data);await refresh({force:true});}
+    if(form.id.startsWith('profile-')){
+      const field=form.id.slice(8);
+      if(field==='password'){
+        if(data.password!==data.confirmPassword) throw new Error('Las contraseñas nuevas no coinciden.');
+        delete data.confirmPassword;
+      }
+      profileSave++;
+      savingProfile=true;
+      try { session.me=await api('profile/'+field,data); }
+      finally { savingProfile=false; }
+      await refresh({force:true});
+      message({name:'Nombre actualizado.',email:'Correo actualizado.',password:'Contraseña actualizada.'}[field]);
+    }
   }catch(error){message(error.message);}
   finally{button.disabled=false;}
 });

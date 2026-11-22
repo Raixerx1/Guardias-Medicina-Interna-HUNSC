@@ -22,7 +22,10 @@ function log(state,actor,action,details) {
 function notify(state,recipients,message) {
   for (const to of new Set(recipients)) state.notifications.unshift({id:randomUUID(),to,message,at:now(),read:false});
 }
-function me(user) { return {id:user.id,name:user.name,role:user.role}; }
+function me(user) { return {id:user.id,name:user.name,role:user.role,email:user.email,hasPassword:!!user.password}; }
+const cleanEmail = email => typeof email === 'string' ? email.trim().toLowerCase() : '';
+const validEmail = email => email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const validPassword = value => typeof value === 'string' && value.length >= 14 && value.length <= 128;
 function coordinators(state) { return Object.values(state.users).filter(u => u.role === 'coord').map(u => u.id); }
 const staticFiles = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
@@ -320,7 +323,7 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
       }
       requireThat(body && typeof body === 'object' && !Array.isArray(body),400,'Se esperaba un objeto JSON.');
       requireThat(Buffer.byteLength(JSON.stringify(body)) <= 750000,413,'Archivo demasiado grande.');
-      if (['/login','/join','/demo','/setup'].includes(action)) {
+      if (['/login','/join','/demo','/setup','/profile/email','/profile/password'].includes(action)) {
         const ip = req.socket.remoteAddress;
         const count = attempts.get(ip);
         if (!count || count.until < Date.now()) attempts.set(ip,{n:1,until:Date.now()+60000});
@@ -370,6 +373,39 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
         if (action === '/logout') {
           delete state.sessions[sessionId];
           return {data:{},setCookie:cookie('',0)};
+        }
+        if (action === '/profile/name') {
+          const name = typeof body.name === 'string' ? body.name.trim() : '';
+          requireThat(name && name.length <= 100,400,'Escribe un nombre de entre 1 y 100 caracteres.');
+          user.name = name;
+          if (Object.hasOwn(state.people,user.id)) state.people[user.id].name = name;
+          log(state,user.id,'Nombre de perfil actualizado',user.id);
+          return {data:me(user)};
+        }
+        if (action === '/profile/email' || action === '/profile/password') {
+          const current = body.currentPassword;
+          requireThat(user.password && typeof current === 'string' && current.length <= 128 &&
+            passwordMatches(current,user.password),403,'La contraseña actual no es correcta.');
+          if (action === '/profile/email') {
+            const email = cleanEmail(body.email);
+            requireThat(validEmail(email),400,'Correo inválido.');
+            if (email === user.email) return {data:me(user)};
+            const used = Object.values(state.users).some(u => u.email === email);
+            const reserved = Object.values(state.invites).some(i =>
+              i.email === email && !i.revoked && !i.used && i.expires > Date.now());
+            requireThat(!used && !reserved,409,'Ese correo no está disponible.');
+            user.email = email;
+            log(state,user.id,'Correo de acceso actualizado',user.id);
+          } else {
+            requireThat(validPassword(body.password),400,'Usa entre 14 y 128 caracteres.');
+            requireThat(body.password !== current,400,'Elige una contraseña diferente a la actual.');
+            user.password = passwordHash(body.password);
+            log(state,user.id,'Contraseña actualizada',user.id);
+          }
+          for (const [id,active] of Object.entries(state.sessions)) {
+            if (active.userId === user.id) delete state.sessions[id];
+          }
+          return signIn(state,user);
         }
         return {data:route(state,user,action,body)};
       });
