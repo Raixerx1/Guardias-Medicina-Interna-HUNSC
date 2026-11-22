@@ -43,7 +43,8 @@ async function refresh({force=false}={}) {
         month=selected.slice(0,7);
       }
     }
-    if (force || (wasStale && tab!=='profile') || (JSON.stringify(old)!==JSON.stringify(next) && !dialog.open && !['import','invite','profile'].includes(tab))) render();
+    const menuOpen=document.querySelector('.mobile-more[open]');
+    if (force || (wasStale && tab!=='profile' && !menuOpen) || (JSON.stringify(old)!==JSON.stringify(next) && !dialog.open && !menuOpen && !['import','invite','profile'].includes(tab))) render();
     if (wasStale && tab==='profile' && !force) document.querySelector('#connection')?.setAttribute('hidden','');
   } catch(error) {
     if (started!==profileSave) return;
@@ -248,13 +249,37 @@ function imports() {
       }).join('')+'</div><div class="actions">'+(d.status==='draft'?'<button class="btn primary" data-draft="'+d.id+'/review">Confirmar revisión</button>':'<button class="btn primary" data-draft="'+d.id+'/publish">Publicar cuadrante</button>')+'<button class="btn" data-draft="'+d.id+'/discard">Descartar</button></div></section>';
     }).join('')+'</div>';
 }
+function signupControls() {
+  const active=state.signupLink?.expires>Date.now();
+  const link=active&&sharedLink?.expires===state.signupLink.expires?sharedLink.url:null;
+  return (active?'<p class="row">Tiempo restante: <strong id="signup-time">'+signupTime(state.signupLink.expires)+'</strong> · <span id="signup-uses">'+state.signupLink.uses+'</span> altas</p>':
+    '<p class="row">No hay un enlace compartido activo.</p>')+
+    '<div class="actions"><button class="btn primary" data-signup>'+ (active?'Sustituir enlace':'Crear enlace para el servicio')+'</button>'+(active?'<button class="btn" data-revoke-signup>Desactivar enlace</button>':'')+'</div>'+
+    (link?'<label class="notice">Enlace de alta<input id="shared-link" readonly value="'+escape(link)+'"></label><button class="btn" data-copy-signup>Copiar enlace</button>':'');
+}
+function signupTime(expires) {
+  const left=Math.max(0,Math.ceil((expires-Date.now())/1000));
+  return Math.floor(left/60)+' min '+String(left%60).padStart(2,'0')+' s';
+}
+function updateSignupControls() {
+  const panel=document.querySelector('#signup-controls');
+  if(!panel || panel.querySelector('button:disabled')) return;
+  const expires=state?.signupLink?.expires;
+  const active=expires>Date.now();
+  if(panel.dataset.active!==(active?String(expires):'')){
+    panel.dataset.active=active?String(expires):'';
+    panel.innerHTML=signupControls();
+  }
+  if(active){
+    panel.querySelector('#signup-time').textContent=signupTime(expires);
+    panel.querySelector('#signup-uses').textContent=state.signupLink.uses;
+  }
+}
 function invitations() {
   const people=Object.values(state.people);
-  const active=state.signupLink?.expires>Date.now();
-  return '<div class="stack compact"><section class="card"><h2 class="headspace">Enlace de alta para el servicio</h2><p class="muted">Comparte un solo enlace con tus compañeros. Cada uno elige su nombre visible, correo y contraseña. El enlace caduca en 7 días.</p>'+
-    (active?'<p class="row">Activo hasta el '+new Date(state.signupLink.expires).toLocaleString('es-ES')+' · '+state.signupLink.uses+' altas</p>':'')+
-    '<div class="actions"><button class="btn primary" data-signup>'+ (active?'Crear otro enlace y sustituir el anterior':'Crear enlace para el servicio')+'</button>'+(active?'<button class="btn" data-revoke-signup>Desactivar enlace</button>':'')+'</div>'+
-    (active&&sharedLink?'<label class="notice">Enlace de alta<input id="shared-link" readonly value="'+escape(sharedLink)+'"></label><button class="btn" data-copy-signup>Copiar enlace</button>':'')+'</section>'+
+  const expires=state.signupLink?.expires;
+  return '<div class="stack compact"><section class="card"><h2 class="headspace">Enlace de alta para el servicio</h2><p class="muted">Tus compañeros eligen su nombre visible, correo y contraseña. El enlace caduca una hora después de crearlo. Para admitir más altas, genera otro enlace.</p>'+
+    '<div id="signup-controls" data-active="'+(expires>Date.now()?expires:'')+'">'+signupControls()+'</div></section>'+
     '<section class="card"><h2 class="headspace">Invitar a una persona</h2><form id="invite"><label>Correo<input type="email" name="email" required></label><label>Perfil existente<select name="physicianId"><option value="">Crear perfil</option>'+people.map(p=>'<option value="'+escape(p.id)+'">'+escape(p.name)+'</option>').join('')+'</select></label><label>Nombre visible para perfil nuevo<input name="name" maxlength="100"></label><div><button class="btn primary">Crear invitación individual</button></div></form>'+
     (invite?'<div class="notice"><p>Comparte este enlace privado con la persona invitada. Caduca en 24 horas.</p><input aria-label="Enlace de invitación" readonly value="'+escape(location.origin+'/#invite='+invite.token)+'"><p>Identificador para JSON: <code>'+escape(invite.physicianId)+'</code></p></div>':'')+
     '<details class="row"><summary>Identificadores para importar</summary>'+people.map(p=>'<p>'+escape(p.name)+' · <code>'+escape(p.id)+'</code></p>').join('')+'</details></section></div>';
@@ -285,7 +310,14 @@ function render() {
   if(!nav[tab]) tab='service';
   const pending=state.notifications.filter(n=>!n.read).length;
   const views={service:calendar,mine:calendar,request:requests,notifications,import:imports,invite:invitations,history,profile};
-  root.innerHTML='<div class="shell"><aside class="sidebar">'+brand+'<nav class="nav" aria-label="Secciones">'+Object.entries(nav).map(([k,v])=>'<button data-tab="'+k+'" '+(tab===k?'aria-current="page"':'')+'>'+v+(k==='notifications'&&pending?' ('+pending+')':'')+'</button>').join('')+'</nav><p class="session">'+escape(state.me.name)+'</p><button class="signout" data-logout>Salir</button></aside>'+
+  const primary=['service','mine','request'];
+  const sectionButton=(k,v)=>'<button type="button" data-tab="'+k+'" '+(tab===k?'aria-current="page"':'')+'>'+v+(k==='notifications'&&pending?' ('+pending+')':'')+'</button>';
+  const desktopNav='<nav class="nav" aria-label="Secciones">'+Object.entries(nav).map(([k,v])=>sectionButton(k,v)).join('')+'</nav>';
+  const mobileNav='<nav class="mobile-nav" aria-label="Secciones"><div class="mobile-nav-inner">'+
+    primary.map(k=>sectionButton(k,k==='mine'?'Mi agenda':nav[k])).join('')+
+    '<details class="mobile-more"><summary '+(!primary.includes(tab)?'class="current"':'')+'>Más'+(pending?' <span aria-label="'+pending+' avisos sin leer" class="nav-dot"></span>':'')+'</summary>'+
+    '<div class="mobile-menu">'+Object.entries(nav).filter(([k])=>!primary.includes(k)).map(([k,v])=>sectionButton(k,v)).join('')+'</div></details></div></nav>';
+  root.innerHTML='<div class="shell"><aside class="sidebar">'+brand+desktopNav+mobileNav+'<p class="session">'+escape(state.me.name)+'</p><button class="signout" data-logout>Salir</button></aside>'+
     '<main class="content"><header class="top"><div><h1>'+nav[tab]+'</h1><p class="muted">'+escape(state.me.name)+'</p></div>'+(session.demo?'<span class="pill">Datos ficticios</span>':'')+'</header><p id="connection" class="banner" '+(stale?'':'hidden')+'>Sin conexión con el calendario. Los datos pueden estar desactualizados.</p>'+views[tab]()+'</main></div>';
 }
 function showDialog(title,html,onSubmit) {
@@ -343,7 +375,7 @@ root.addEventListener('click',async event=>{
     if(d.fixture!==undefined){await api('imports',fixture);await refresh({force:true});message('Ejemplo importado como borrador.');}
     if(d.signup!==undefined){
       const created=await api('signup-link',{});
-      sharedLink=location.origin+'/#register='+created.token;
+      sharedLink={url:location.origin+'/#register='+created.token,expires:created.expires};
       await refresh({force:true});
       message('Enlace reutilizable creado.');
     }
@@ -352,7 +384,8 @@ root.addEventListener('click',async event=>{
       sharedLink=null;await refresh({force:true});message('Enlace desactivado.');
     }
     if(d.copySignup!==undefined) {
-      try { await navigator.clipboard.writeText(sharedLink); message('Enlace copiado.'); }
+      if(!sharedLink || sharedLink.expires<=Date.now()) throw new Error('El enlace ha caducado. Genera uno nuevo.');
+      try { await navigator.clipboard.writeText(sharedLink.url); message('Enlace copiado.'); }
       catch { document.querySelector('#shared-link').select(); message('Copia el enlace seleccionado.'); }
     }
     if(d.draft){
@@ -404,5 +437,6 @@ try {
   if(session.me) await refresh({force:true});else render();
 } catch(error) {root.innerHTML='<main class="login"><section class="card">'+brand+'<h1>GuardiaMI</h1><p>'+escape(error.status===503?error.message:'No se puede conectar al servidor de GuardiaMI.')+'</p></section></main>';}
 setInterval(()=>{if(session?.me)refresh();},5000);
+setInterval(updateSignupControls,1000);
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 

@@ -27,7 +27,7 @@ En **Importar → Importar desde una foto**, elige una imagen de frente, las fec
 
 El formato sigue el ejemplo en la carpeta de traspaso. Usa la zona Atlantic/Canary, versión 1.0 y serviceId servicio-demo para esta instancia local. Coordinación puede consultar los identificadores de los perfiles en **Invitaciones**. Las casillas omitidas o sin identificar deben corregirse antes de publicar. Los cambios ya acordados quedan protegidos si se reimporta un cuadrante anterior.
 
-En **Invitaciones** se puede generar un enlace de alta compartido que dura siete días. Cada persona crea una cuenta de facultativo e indica su nombre visible. Comparte el enlace solo con tu servicio. Coordinación puede desactivarlo o sustituirlo. Usa la invitación individual si necesitas vincular una cuenta a un perfil que ya figura en un cuadrante.
+En **Invitaciones** coordinación puede generar un enlace de alta compartido que caduca una hora después de crearlo. Cada persona indica su nombre visible y crea una cuenta de facultativo. Comparte el enlace solo con tu servicio. Coordinación puede desactivarlo o sustituirlo. Una vez caducado hay que generar otro manualmente. La invitación individual permite vincular una cuenta a un perfil que ya figura en el cuadrante.
 
 ## Pruebas
 ```powershell

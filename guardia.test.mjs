@@ -26,6 +26,8 @@ test('la lectura asigna solo nombres inequívocos de una fila confirmada',()=>{
 
 test('la activación de coordinación es de uso único y la sesión exige HTTPS',async t=>{
   let persisted=initialState();
+  const legacyToken='enlace-antiguo-ficticio';
+  persisted.signupLink={hash:createHash('sha256').update(legacyToken).digest('hex'),expires:Date.now()+7*86400000,uses:0};
   const store={
     async read(){return structuredClone(persisted);},
     async write(change){
@@ -44,6 +46,9 @@ test('la activación de coordinación es de uso único y la sesión exige HTTPS'
   const session=async()=>await (await fetch(url+'session')).json();
   const activate=code=>fetch(url+'setup',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({token:code,email:'coord@example.invalid',password:'contraseña-demo-privada'})});
+  const legacy=await fetch(url+'register',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:legacyToken,email:'legacy@example.invalid',name:'Cuenta ficticia',password:'contraseña-demo-privada'})});
+  assert.equal(legacy.status,403);
   assert.equal((await session()).setup,true);
   assert.equal((await activate('incorrecto')).status,403);
   const response=await activate(token);
@@ -87,7 +92,9 @@ test('invitación, publicación revisada, intercambio, cobertura y protección',
   await b('demo',{id:'demo-002'});
   await c('demo',{id:'demo-007'});
   await a('signup-link',{},403);
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const sharedLink=await coord('signup-link',{});
+  assert.equal(sharedLink.expires-Date.now(),3600000);
   const register=async (n,expected=200)=>client()('register',{token:sharedLink.token,email:'alta'+n+'@guardia.invalid',
     name:'Facultativo nuevo '+n,password:'contraseña-de-prueba'},expected);
   const newlyRegistered=await register(1);
@@ -97,8 +104,17 @@ test('invitación, publicación revisada, intercambio, cobertura y protección',
   await register(1,409);
   assert.equal((await coord('state')).signupLink.uses,2);
   assert.equal((await a('state')).signupLink,null);
+  t.mock.timers.tick(3599999);
+  await register(3);
+  t.mock.timers.tick(1);
+  await register(4,403);
+  assert.equal((await coord('state')).signupLink,null);
+  const replacement=await coord('signup-link',{});
+  await register(5,403);
   await coord('signup-link/revoke',{});
-  await register(3,403);
+  await client()('register',{token:replacement.token,email:'revocado@guardia.invalid',
+    name:'Perfil ficticio',password:'contraseña-de-prueba'},403);
+  t.mock.timers.reset();
   const invite=await coord('invite',{email:'invitado@guardia.invalid',name:'Facultativo invitado'});
   await guest('join',{token:invite.token,password:'contraseña-de-prueba'});
   await client()('join',{token:invite.token,password:'contraseña-de-prueba'},409);

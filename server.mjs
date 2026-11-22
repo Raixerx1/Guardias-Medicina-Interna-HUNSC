@@ -26,6 +26,12 @@ function me(user) { return {id:user.id,name:user.name,role:user.role,email:user.
 const cleanEmail = email => typeof email === 'string' ? email.trim().toLowerCase() : '';
 const validEmail = email => email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const validPassword = value => typeof value === 'string' && value.length >= 14 && value.length <= 128;
+const signupLifetime = 60 * 60 * 1000;
+function activeSignupLink(state) {
+  const link = state.signupLink;
+  return Number.isFinite(link?.issuedAt) &&
+    link.expires === link.issuedAt + signupLifetime && link.expires > Date.now() ? link : null;
+}
 function coordinators(state) { return Object.values(state.users).filter(u => u.role === 'coord').map(u => u.id); }
 const staticFiles = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
@@ -140,10 +146,11 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
     const coord = user.role === 'coord';
     if (path === '/state') {
       const changes = Object.values(state.changes).filter(c => coord || c.from === user.id || c.to === user.id);
+      const link = coord ? activeSignupLink(state) : null;
       return {me:me(user), revision:state.revision,people:state.people,...schedule(state),
         drafts:coord ? Object.values(state.drafts).map(d => ({...d,errors:draftErrors(d,state.people)})) : [],
         changes, notifications:state.notifications.filter(n => n.to === user.id),audit:coord ? state.audit : [],
-        signupLink:coord && state.signupLink ? {expires:state.signupLink.expires,uses:state.signupLink.uses} : null};
+        signupLink:link ? {expires:link.expires,uses:link.uses} : null};
     }
     if (path === '/notifications/read') {
       state.notifications.filter(n => n.to === user.id).forEach(n => {n.read=true;});
@@ -178,9 +185,10 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
         return {};
       }
       const secret = token();
-      state.signupLink = {hash:hash(secret),expires:Date.now()+7*86400000,uses:0};
+      const issuedAt = Date.now();
+      state.signupLink = {hash:hash(secret),issuedAt,expires:issuedAt+signupLifetime,uses:0};
       log(state,user.id,'Enlace de alta creado',user.id);
-      return {token:secret};
+      return {token:secret,expires:state.signupLink.expires};
     }
     if (path.startsWith('/imports')) {
       requireThat(coord,403,'Solo coordinación puede importar.');
@@ -395,8 +403,8 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
           return signIn(state,user);
         }
         if (action === '/register') {
-          const link = state.signupLink;
-          requireThat(link && link.expires > Date.now() && typeof body.token === 'string' &&
+          const link = activeSignupLink(state);
+          requireThat(link && typeof body.token === 'string' &&
             timingSafeEqual(Buffer.from(hash(body.token)),Buffer.from(link.hash)),403,'El enlace de alta ha caducado o ya no está activo.');
           const email = cleanEmail(body.email);
           const name = typeof body.name === 'string' ? body.name.trim() : '';
