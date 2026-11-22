@@ -4,6 +4,25 @@ import {once} from 'node:events';
 import {createHash} from 'node:crypto';
 import {createApp,initialState} from './server.mjs';
 import {positions,saliente} from './domain.mjs';
+import {photoDates,readCells} from './public/ocr.js';
+
+test('la lectura asigna solo nombres inequívocos de una fila confirmada',()=>{
+  const dates=photoDates('2026-11-23','2026-11-24');
+  const columns=['date',...Object.keys(positions)];
+  const divisions=[0,0.1,0.25,0.4,0.55,0.7,0.85,1];
+  const word=(text,x,y,confidence=92)=>({text,confidence,bbox:{x0:x,x1:x+8,y0:y,y1:y+8}});
+  const people=[{id:'a',name:'Lía Prueba'},{id:'b',name:'Dani Demo'},{id:'c',name:'Dani Demo'}];
+  const rows=readCells([
+    word('23',20,30),word('Lía',130,30),word('Prueba',175,30),word('Dani Demo',265,30),
+    word('Lía Prueba',420,30,50),word('25',20,130),word('Lía Prueba',130,130)
+  ],{width:1000,height:200,dates,columns,divisions,people});
+  assert.equal(rows.length,12);
+  assert.equal(rows[0].physicianId,'a');
+  assert.equal(rows[1].physicianId,null);
+  assert.equal(rows[2].physicianId,null);
+  assert.match(rows[6].sourceText,/Revisa la fecha/);
+  assert.equal(rows[6].physicianId,null);
+});
 
 test('la activación de coordinación es de uso único y la sesión exige HTTPS',async t=>{
   let persisted=initialState();
@@ -67,6 +86,19 @@ test('invitación, publicación revisada, intercambio, cobertura y protección',
   await a('demo',{id:'demo-001'});
   await b('demo',{id:'demo-002'});
   await c('demo',{id:'demo-007'});
+  await a('signup-link',{},403);
+  const sharedLink=await coord('signup-link',{});
+  const register=async (n,expected=200)=>client()('register',{token:sharedLink.token,email:'alta'+n+'@guardia.invalid',
+    name:'Facultativo nuevo '+n,password:'contraseña-de-prueba'},expected);
+  const newlyRegistered=await register(1);
+  assert.equal(newlyRegistered.role,'doctor');
+  assert.equal(newlyRegistered.name,'Facultativo nuevo 1');
+  await register(2);
+  await register(1,409);
+  assert.equal((await coord('state')).signupLink.uses,2);
+  assert.equal((await a('state')).signupLink,null);
+  await coord('signup-link/revoke',{});
+  await register(3,403);
   const invite=await coord('invite',{email:'invitado@guardia.invalid',name:'Facultativo invitado'});
   await guest('join',{token:invite.token,password:'contraseña-de-prueba'});
   await client()('join',{token:invite.token,password:'contraseña-de-prueba'},409);
@@ -94,15 +126,19 @@ test('invitación, publicación revisada, intercambio, cobertura y protección',
   await client()('login',{email:updated.email,password:oldPassword},401);
   await client()('login',{email:updated.email,password:newPassword});
   const rows = (date,primary) => Object.keys(positions).map((position,i)=>({date,position,physicianId:[primary,'demo-003','demo-004','demo-005','demo-006','demo-008'][i],sourceCell:'fila-'+i}));
-  const original={schemaVersion:'1.0',timezone:'Atlantic/Canary',serviceId:'servicio-demo',period:{from:'2026-11-23',to:'2026-11-24'},source:{kind:'manual_transcription',label:'Ficticio'},assignments:[...rows('2026-11-23','demo-001'),...rows('2026-11-24','demo-002')]};
+  const original={schemaVersion:'1.0',timezone:'Atlantic/Canary',serviceId:'servicio-demo',period:{from:'2026-11-23',to:'2026-11-24'},source:{kind:'integrated_ocr',label:'Ficticio'},assignments:[...rows('2026-11-23','demo-001'),...rows('2026-11-24','demo-002')]};
+  original.assignments[0].sourceText='Nombre leído en la foto';
   await a('imports',original,403);
   const {id}=await coord('imports',original);
+  assert.equal((await coord('state')).drafts[0].sourceKind,'photo');
+  assert.equal((await coord('state')).drafts[0].rows[0].sourceText,'Nombre leído en la foto');
   assert.equal((await a('state')).assignments.length,0);
   await coord('imports/'+id+'/publish',{version:1},409);
   await coord('imports/'+id+'/review',{version:1});
   await coord('imports/'+id+'/publish',{version:1},409);
   await coord('imports/'+id+'/publish',{version:2});
   assert.equal((await b('state')).assignments.length,12);
+  assert.equal((await b('state')).assignments[0].sourceText,undefined);
   const swap={type:'swap',own:'2026-11-23/HUNSC_1',target:'2026-11-24/HUNSC_1',ownVersion:1,targetVersion:1};
   const request=await a('changes',swap);
   const competing=await a('changes',swap);

@@ -6,7 +6,9 @@
     "node": "24.x"
   },
   "dependencies": {
-    "@vercel/blob": "2.6.1"
+    "@tesseract.js-data/spa": "1.0.0",
+    "@vercel/blob": "2.6.1",
+    "tesseract.js": "7.0.0"
   },
   "scripts": {
     "start": "node server.mjs",

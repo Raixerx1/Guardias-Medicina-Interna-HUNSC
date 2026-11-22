@@ -44,7 +44,9 @@ export function inspect(data, people) {
       continue;
     }
     const row = {date:item.date, position:item.position, physicianId:item.physicianId ?? null,
-      sourceCell: typeof item.sourceCell === 'string' ? item.sourceCell.slice(0,120) : ''};
+      sourceCell: typeof item.sourceCell === 'string' ? item.sourceCell.slice(0,120) : '',
+      ...(data.source?.kind === 'integrated_ocr' && typeof item.sourceText === 'string'
+        ? {sourceText:item.sourceText.slice(0,140)} : {})};
     if (seen.has(key(row))) issues.push('Puesto duplicado: ' + key(row) + '. Corrige el JSON.');
     seen.add(key(row));
     rows.push(row);
@@ -55,7 +57,7 @@ export function inspect(data, people) {
       rows.push({date,position,physicianId:null,sourceCell:''});
     }
   }
-  return {period,rows,issues};
+  return {period,rows,issues,sourceKind:data.source?.kind === 'integrated_ocr' ? 'photo' : 'json'};
 }
 export function draftErrors(draft, people) {
   return [...draft.issues, ...draft.rows.flatMap(row => Object.hasOwn(people,row.physicianId ?? '')

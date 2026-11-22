@@ -1,3 +1,5 @@
+import {photoDates,readPhoto} from '/ocr.js';
+
 const root = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const toast = document.querySelector('#toast');
@@ -11,6 +13,7 @@ const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'Atlantic/Canary'}).form
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let session, state, tab='service', selected=today, month=today.slice(0,7), stale=false, noticeTimer, invite=null, loaded=false;
 let profileSave=0, savingProfile=false;
+let sharedLink=null, photo=null, photoDraft=null;
 const brand = '<div class="brand"><img src="/icon.svg" alt=""><div>GuardiaMI<small>Medicina Interna</small></div></div>';
 function message(text) {
   clearTimeout(noticeTimer);
@@ -108,26 +111,153 @@ function requests() {
       (['requested','accepted'].includes(c.status)&&mine===c.from?button('cancel','Cancelar solicitud'):'')+'</div></article>';
   }).join(''):'<p class="empty">Todavía no hay solicitudes.</p>')+'</div></section>';
 }
+const photoColumns=['date',...Object.keys(names)];
+function photoForm() {
+  return '<section class="card compact"><h2 class="headspace">Importar desde una foto</h2><p class="muted">Usa una foto de frente con una fila por día y siete columnas. Elige el primer y último día y marca las esquinas de las filas de datos, dejando fuera los encabezados.</p>'+
+    '<form id="photo-import"><label>Foto del cuadrante<input type="file" name="image" accept="image/*" required></label>'+
+    '<div class="date-fields"><label>Primer día<input type="date" name="from" required></label><label>Último día<input type="date" name="to" required></label></div>'+
+    '<div id="photo-preview" hidden><canvas class="photo-preview" id="photo-canvas" aria-label="Vista previa de la foto"></canvas><p class="source" id="photo-hint">Marca la esquina superior izquierda y después la inferior derecha.</p></div>'+
+    '<details><summary>Ajustar el recorte y las columnas</summary><div class="date-fields">'+
+    [['left','Izquierda',0],['top','Arriba',0],['right','Derecha',100],['bottom','Abajo',100]].map(([key,label,value])=>
+      '<label>'+label+' (%)<input name="'+key+'" type="number" min="0" max="100" step="0.1" value="'+value+'" required></label>').join('')+'</div>'+
+    '<label>Separadores de columnas (%)<input name="divisions" value="12, 27, 42, 57, 72, 86" required></label><p class="source">Seis porcentajes dentro del recorte, de izquierda a derecha. Guíate por las líneas verdes.</p>'+
+    '<div class="date-fields">'+photoColumns.map((_,index)=>select('Columna '+(index+1),'column'+index,
+      photoColumns.map((value,i)=>'<option value="'+value+'" '+(i===index?'selected':'')+'>'+(value==='date'?'Fecha':names[value])+'</option>').join(''))).join('')+
+    '</div></details><p class="source">La imagen se lee en tu dispositivo. Al guardar el borrador se envían las casillas transcritas.</p><p id="photo-status" role="status" aria-live="polite"></p><div><button class="btn primary">Leer foto y crear borrador</button></div></form></section>';
+}
+function photoBounds(form) {
+  return Object.fromEntries(['left','top','right','bottom'].map(key=>[key,Number(form.elements[key].value)/100]));
+}
+function photoDivisions(value) {
+  const edges=value.split(',').map(part=>Number(part.trim())/100);
+  if(edges.length!==6||edges.some((edge,i)=>!(edge>(edges[i-1]??0)&&edge<1))) throw new Error('Indica seis separadores crecientes entre 0 y 100.');
+  return [0,...edges,1];
+}
+function paintPhoto(form) {
+  const canvas=form.querySelector('canvas'), context=canvas.getContext('2d');
+  canvas.width=photo.image.naturalWidth;
+  canvas.height=photo.image.naturalHeight;
+  const scale=Math.min(1,1200/Math.max(canvas.width,canvas.height));
+  canvas.width=Math.round(canvas.width*scale);
+  canvas.height=Math.round(canvas.height*scale);
+  context.drawImage(photo.image,0,0,canvas.width,canvas.height);
+  const {left,top,right,bottom}=photoBounds(form);
+  context.strokeStyle='#087b70';
+  context.lineWidth=Math.max(2,canvas.width/330);
+  context.strokeRect(left*canvas.width,top*canvas.height,(right-left)*canvas.width,(bottom-top)*canvas.height);
+  let edges;
+  try { edges=photoDivisions(form.elements.divisions.value); } catch { return; }
+  context.beginPath();
+  for(const edge of edges.slice(1,-1)){
+    const x=(left+edge*(right-left))*canvas.width;
+    context.moveTo(x,top*canvas.height);context.lineTo(x,bottom*canvas.height);
+  }
+  context.stroke();
+}
+function clearPhotoDraft() {
+  if(photoDraft) URL.revokeObjectURL(photoDraft.url);
+  photoDraft=null;
+}
+root.addEventListener('change',async event=>{
+  const form=event.target.form;
+  if(form?.id!=='photo-import') return;
+  if(event.target.name!=='image'){if(photo) paintPhoto(form);return;}
+  const file=event.target.files[0];
+  const status=form.querySelector('#photo-status');
+  photo=null;
+  form.querySelector('#photo-preview').hidden=true;
+  if(!file) return;
+  if(file.size>20*1024*1024){status.textContent='Elige una imagen de hasta 20 MB.';return;}
+  const url=URL.createObjectURL(file);
+  try {
+    const image=new Image();
+    image.src=url;
+    await image.decode();
+    if(event.target.files[0]!==file || !form.isConnected) return;
+    photo={image,file,corner:null};
+    form.querySelector('#photo-preview').hidden=false;
+    status.textContent='';
+    paintPhoto(form);
+  } catch { status.textContent='No se pudo abrir esta imagen. Prueba con JPG o PNG.'; }
+  finally { URL.revokeObjectURL(url); }
+});
+root.addEventListener('click',event=>{
+  if(event.target.id!=='photo-canvas'||!photo) return;
+  const canvas=event.target, form=canvas.closest('form'), rect=canvas.getBoundingClientRect();
+  const x=Math.max(0,Math.min(100,Math.round(1000*(event.clientX-rect.left)/rect.width)/10));
+  const y=Math.max(0,Math.min(100,Math.round(1000*(event.clientY-rect.top)/rect.height)/10));
+  const hint=form.querySelector('#photo-hint');
+  if(!photo.corner){
+    photo.corner={x,y};
+    hint.textContent='Ahora marca la esquina inferior derecha.';
+    return;
+  }
+  form.elements.left.value=Math.min(photo.corner.x,x);
+  form.elements.top.value=Math.min(photo.corner.y,y);
+  form.elements.right.value=Math.max(photo.corner.x,x);
+  form.elements.bottom.value=Math.max(photo.corner.y,y);
+  photo.corner=null;
+  hint.textContent='Recorte marcado. Puedes volver a marcar ambas esquinas.';
+  paintPhoto(form);
+});
+async function importPhoto(form,data) {
+  if(!photo || photo.file!==form.elements.image.files[0]) throw new Error('Selecciona una foto compatible.');
+  const dates=photoDates(data.from,data.to), divisions=photoDivisions(data.divisions);
+  const columns=photoColumns.map((_,i)=>data['column'+i]);
+  if(new Set(columns).size!==7||!columns.every(value=>photoColumns.includes(value))) throw new Error('Cada fecha o puesto debe aparecer en una sola columna.');
+  const {left,top,right,bottom}=photoBounds(form);
+  const image=photo.image;
+  const width=(right-left)*image.naturalWidth, height=(bottom-top)*image.naturalHeight;
+  if(width<120||height<24) throw new Error('Marca un recorte más amplio que incluya las siete columnas.');
+  const canvas=document.createElement('canvas');
+  const scale=Math.min(1,2600/Math.max(width,height));
+  canvas.width=Math.round(width*scale);canvas.height=Math.round(height*scale);
+  const context=canvas.getContext('2d');
+  context.drawImage(image,left*image.naturalWidth,top*image.naturalHeight,width,height,0,0,canvas.width,canvas.height);
+  const status=form.querySelector('#photo-status');
+  status.textContent='Preparando lector de fotos…';
+  try {
+    const assignments=await readPhoto(canvas,{dates,columns,divisions,people:Object.values(state.people)},text=>status.textContent=text);
+    if(!session?.me || state?.me.role!=='coord') return;
+    const {id}=await api('imports',{schemaVersion:'1.0',serviceId:'servicio-demo',timezone:'Atlantic/Canary',
+      period:{from:data.from,to:data.to},source:{kind:'integrated_ocr',label:'Foto'},assignments});
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.83));
+    clearPhotoDraft();
+    if(blob) photoDraft={id,url:URL.createObjectURL(blob)};
+    photo=null;
+    await refresh({force:true});
+    document.querySelector('#draft-'+id)?.scrollIntoView({block:'start'});
+    message('Borrador de foto listo para revisar.');
+  } finally { status.textContent=''; }
+}
 function imports() {
-  return '<div class="stack"><section class="card compact"><h2 class="headspace">Añadir transcripción</h2><p class="muted">Sube el JSON de un cuadrante ya confeccionado. Podrás corregir cada casilla antes de publicar.</p><form id="upload"><label>Archivo JSON<input name="file" type="file" accept=".json,application/json" required></label><div class="actions"><button class="btn primary">Importar borrador</button>'+(session.demo?'<button class="btn" type="button" data-fixture>Cargar ejemplo ficticio</button>':'')+'</div></form></section>'+
+  return '<div class="stack">'+photoForm()+'<section class="card compact"><h2 class="headspace">Importar JSON</h2><form id="upload"><label>Archivo JSON<input name="file" type="file" accept=".json,application/json" required></label><div class="actions"><button class="btn primary">Importar borrador</button>'+(session.demo?'<button class="btn" type="button" data-fixture>Cargar ejemplo ficticio</button>':'')+'</div></form></section>'+
     state.drafts.filter(d=>d.status!=='published').map(d=>{
       const differences=d.rows.filter(r=>state.assignments.some(a=>slot(a)===slot(r)&&a.physicianId!==r.physicianId));
-      return '<section class="card compact"><div class="bar"><h2>Borrador</h2><span class="pill">'+(d.status==='reviewed'?'Revisado':'Pendiente de revisión')+'</span></div><p>'+d.period.from+' a '+d.period.to+' · '+d.rows.length+' casillas · '+differences.length+' titulares distintos del publicado</p>'+
+      return '<section class="card compact" id="draft-'+d.id+'"><div class="bar"><h2>'+(d.sourceKind==='photo'?'Borrador de foto':'Borrador')+'</h2><span class="pill">'+(d.status==='reviewed'?'Revisado':'Pendiente de revisión')+'</span></div><p>'+d.period.from+' a '+d.period.to+' · '+d.rows.length+' casillas · '+differences.length+' titulares distintos del publicado</p>'+
+      (d.id===photoDraft?.id?'<details class="row"><summary>Comparar con la foto</summary><img class="photo-preview" alt="Foto recortada del cuadrante" src="'+escape(photoDraft.url)+'"></details>':'')+
+      (d.sourceKind==='photo'?'<p class="muted">Compara todos los titulares y fechas con la foto original antes de confirmar.</p>':'')+
       (d.base!==state.revision?'<p class="banner">El calendario cambió desde esta importación.</p>':'')+
       (d.errors.length?'<p class="banner">'+d.errors.length+' incidencias. '+escape(d.errors[0])+'</p>':'')+
       '<div class="scroll">'+d.rows.map(r=>{
         const previous=state.assignments.find(a=>slot(a)===slot(r));
         const conflict=previous && previous.physicianId!==r.physicianId;
         return '<div class="row line"><div><strong>'+r.date+' · '+names[r.position]+'</strong><p>'+(r.physicianId?name(r.physicianId):'Sin identificar')+'</p>'+
+        (r.sourceText?'<p class="source">Lectura: '+escape(r.sourceText)+'</p>':'')+
         (conflict?'<p class="source">Publicado: '+name(previous.physicianId)+(previous.protected?' · Cambio protegido':'')+'</p>':'')+'</div><button class="btn" data-edit="'+d.id+'|'+slot(r)+'">Corregir</button></div>';
       }).join('')+'</div><div class="actions">'+(d.status==='draft'?'<button class="btn primary" data-draft="'+d.id+'/review">Confirmar revisión</button>':'<button class="btn primary" data-draft="'+d.id+'/publish">Publicar cuadrante</button>')+'<button class="btn" data-draft="'+d.id+'/discard">Descartar</button></div></section>';
     }).join('')+'</div>';
 }
 function invitations() {
   const people=Object.values(state.people);
-  return '<section class="card compact"><h2 class="headspace">Invitar a un facultativo</h2><form id="invite"><label>Correo<input type="email" name="email" required></label><label>Perfil existente<select name="physicianId"><option value="">Crear perfil</option>'+people.map(p=>'<option value="'+escape(p.id)+'">'+escape(p.name)+'</option>').join('')+'</select></label><label>Nombre visible para perfil nuevo<input name="name" maxlength="100"></label><div><button class="btn primary">Crear invitación</button></div></form>'+
+  const active=state.signupLink?.expires>Date.now();
+  return '<div class="stack compact"><section class="card"><h2 class="headspace">Enlace de alta para el servicio</h2><p class="muted">Comparte un solo enlace con tus compañeros. Cada uno elige su nombre visible, correo y contraseña. El enlace caduca en 7 días.</p>'+
+    (active?'<p class="row">Activo hasta el '+new Date(state.signupLink.expires).toLocaleString('es-ES')+' · '+state.signupLink.uses+' altas</p>':'')+
+    '<div class="actions"><button class="btn primary" data-signup>'+ (active?'Crear otro enlace y sustituir el anterior':'Crear enlace para el servicio')+'</button>'+(active?'<button class="btn" data-revoke-signup>Desactivar enlace</button>':'')+'</div>'+
+    (active&&sharedLink?'<label class="notice">Enlace de alta<input id="shared-link" readonly value="'+escape(sharedLink)+'"></label><button class="btn" data-copy-signup>Copiar enlace</button>':'')+'</section>'+
+    '<section class="card"><h2 class="headspace">Invitar a una persona</h2><form id="invite"><label>Correo<input type="email" name="email" required></label><label>Perfil existente<select name="physicianId"><option value="">Crear perfil</option>'+people.map(p=>'<option value="'+escape(p.id)+'">'+escape(p.name)+'</option>').join('')+'</select></label><label>Nombre visible para perfil nuevo<input name="name" maxlength="100"></label><div><button class="btn primary">Crear invitación individual</button></div></form>'+
     (invite?'<div class="notice"><p>Comparte este enlace privado con la persona invitada. Caduca en 24 horas.</p><input aria-label="Enlace de invitación" readonly value="'+escape(location.origin+'/#invite='+invite.token)+'"><p>Identificador para JSON: <code>'+escape(invite.physicianId)+'</code></p></div>':'')+
-    '<details class="row"><summary>Identificadores para importar</summary>'+people.map(p=>'<p>'+escape(p.name)+' · <code>'+escape(p.id)+'</code></p>').join('')+'</details></section>';
+    '<details class="row"><summary>Identificadores para importar</summary>'+people.map(p=>'<p>'+escape(p.name)+' · <code>'+escape(p.id)+'</code></p>').join('')+'</details></section></div>';
 }
 function notifications() {
   return '<section class="card compact"><div class="bar"><h2>Bandeja</h2><button class="btn" data-read>Marcar todas como leídas</button></div>'+
@@ -139,12 +269,13 @@ function history() {
 function render() {
   if (!session?.me) {
     const joining=location.hash.startsWith('#invite=');
+    const registering=location.hash.startsWith('#register=');
     const setup=session?.setup && location.hash.startsWith('#setup=');
-    const activation=joining||setup;
-    root.innerHTML='<main class="login"><section class="card">'+brand+'<h1>'+(setup?'Activar coordinación':joining?'Activar invitación':'Acceso al cuadrante')+'</h1><p class="muted">'+(activation?'Elige una contraseña para tu cuenta.':'Consulta tus turnos y gestiona cambios con tus compañeros.')+'</p>'+
-    (session?.demo&&!joining?'<div class="notice"><p>Demostración con datos ficticios</p><div class="actions"><button class="btn primary" data-demo="coord">Coordinación</button><button class="btn" data-demo="demo-001">Facultativo 01</button><button class="btn" data-demo="demo-002">Facultativo 02</button><button class="btn" data-demo="demo-007">Facultativo 07</button></div></div>':'')+
-    '<form id="'+(setup?'setup':joining?'join':'login')+'">'+(joining?'':'<label>Correo<input type="email" name="email" autocomplete="username" required></label>')+
-    '<label>Contraseña<input type="password" name="password" autocomplete="'+(activation?'new-password':'current-password')+'" '+(activation?'minlength="14" ':'')+'required></label><button class="btn primary">'+(activation?'Activar cuenta':'Entrar')+'</button></form></section></main>';
+    const activation=joining||setup||registering;
+    root.innerHTML='<main class="login"><section class="card">'+brand+'<h1>'+(registering?'Crear mi cuenta':setup?'Activar coordinación':joining?'Activar invitación':'Acceso al cuadrante')+'</h1><p class="muted">'+(registering?'Elige el nombre que verán tus compañeros en el cuadrante.':activation?'Elige una contraseña para tu cuenta.':'Consulta tus turnos y gestiona cambios con tus compañeros.')+'</p>'+
+    (session?.demo&&!activation?'<div class="notice"><p>Demostración con datos ficticios</p><div class="actions"><button class="btn primary" data-demo="coord">Coordinación</button><button class="btn" data-demo="demo-001">Facultativo 01</button><button class="btn" data-demo="demo-002">Facultativo 02</button><button class="btn" data-demo="demo-007">Facultativo 07</button></div></div>':'')+
+    '<form id="'+(registering?'register':setup?'setup':joining?'join':'login')+'">'+(registering?'<label>Nombre visible<input name="name" maxlength="100" autocomplete="name" required></label>':'')+(joining?'':'<label>Correo<input type="email" name="email" autocomplete="username" required></label>')+
+    '<label>Contraseña<input type="password" name="password" autocomplete="'+(activation?'new-password':'current-password')+'" '+(activation?'minlength="14" maxlength="128" ':'')+'required></label><button class="btn primary">'+(registering?'Registrarme':activation?'Activar cuenta':'Entrar')+'</button></form>'+(registering?'<a href="/">Ya tengo una cuenta</a>':'')+'</section></main>';
     return;
   }
   if (!state) return;
@@ -191,7 +322,7 @@ const fixture={schemaVersion:'1.0',serviceId:'servicio-demo',timezone:'Atlantic/
 async function setSession(path,data) {
   session.me=await api(path,data);
   if(location.hash) historyReplace();
-  tab='service';invite=null;loaded=false;await refresh({force:true});
+  tab='service';invite=null;sharedLink=null;loaded=false;await refresh({force:true});
 }
 function historyReplace(){ window.history.replaceState(null,'',location.pathname); }
 root.addEventListener('click',async event=>{
@@ -201,7 +332,7 @@ root.addEventListener('click',async event=>{
   button.disabled=true;
   try {
     if(d.demo) await setSession('demo',{id:d.demo});
-    if(d.logout!==undefined){await api('logout',{});state=null;session.me=null;invite=null;loaded=false;render();}
+    if(d.logout!==undefined){await api('logout',{});state=null;session.me=null;invite=null;sharedLink=null;photo=null;clearPhotoDraft();loaded=false;render();}
     if(d.tab){tab=d.tab;render();await refresh({force:true});}
     if(d.date){selected=d.date;render();}
     if(d.today!==undefined){selected=today;month=today.slice(0,7);render();}
@@ -210,6 +341,20 @@ root.addEventListener('click',async event=>{
     if(d.request){await api('changes/'+d.request,{});await refresh({force:true});message('Solicitud actualizada.');}
     if(d.read!==undefined){await api('notifications/read',{});await refresh({force:true});}
     if(d.fixture!==undefined){await api('imports',fixture);await refresh({force:true});message('Ejemplo importado como borrador.');}
+    if(d.signup!==undefined){
+      const created=await api('signup-link',{});
+      sharedLink=location.origin+'/#register='+created.token;
+      await refresh({force:true});
+      message('Enlace reutilizable creado.');
+    }
+    if(d.revokeSignup!==undefined){
+      await api('signup-link/revoke',{});
+      sharedLink=null;await refresh({force:true});message('Enlace desactivado.');
+    }
+    if(d.copySignup!==undefined) {
+      try { await navigator.clipboard.writeText(sharedLink); message('Enlace copiado.'); }
+      catch { document.querySelector('#shared-link').select(); message('Copia el enlace seleccionado.'); }
+    }
     if(d.draft){
       const draft=state.drafts.find(a=>a.id===d.draft.split('/')[0]);
       if(d.draft.endsWith('/publish')) {
@@ -233,8 +378,10 @@ root.addEventListener('submit',async event=>{
   try{
     if(form.id==='login') await setSession('login',data);
     if(form.id==='join') await setSession('join',{...data,token:location.hash.slice(8)});
+    if(form.id==='register') await setSession('register',{...data,token:location.hash.slice(10)});
     if(form.id==='setup') await setSession('setup',{...data,token:location.hash.slice(7)});
     if(form.id==='upload'){if(data.file.size>750000) throw new Error('El archivo supera el límite.');await api('imports',JSON.parse(await data.file.text()));await refresh({force:true});message('Borrador importado.');}
+    if(form.id==='photo-import') await importPhoto(form,data);
     if(form.id==='invite'){invite=await api('invite',data);await refresh({force:true});}
     if(form.id.startsWith('profile-')){
       const field=form.id.slice(8);

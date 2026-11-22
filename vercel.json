@@ -1,6 +1,7 @@
 {
   "framework": null,
   "outputDirectory": "public",
+  "buildCommand": "node prepare-ocr.mjs",
   "regions": ["fra1"],
   "rewrites": [
     { "source": "/api/:route*", "destination": "/api/gateway?route=:route*" }
@@ -12,7 +13,7 @@
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "Referrer-Policy", "value": "no-referrer" },
         { "key": "X-Robots-Tag", "value": "noindex" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }
       ]
     }
   ]

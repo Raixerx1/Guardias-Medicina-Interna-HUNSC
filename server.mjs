@@ -30,7 +30,13 @@ function coordinators(state) { return Object.values(state.users).filter(u => u.r
 const staticFiles = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
   '/style.css':['style.css','text/css; charset=utf-8'], '/manifest.webmanifest':['manifest.webmanifest','application/manifest+json'],
-  '/sw.js':['sw.js','text/javascript; charset=utf-8'], '/icon.svg':['icon.svg','image/svg+xml']
+  '/sw.js':['sw.js','text/javascript; charset=utf-8'], '/icon.svg':['icon.svg','image/svg+xml'],
+  '/ocr.js':['ocr.js','text/javascript; charset=utf-8']
+};
+const ocrAssets = {
+  'tesseract.min.js':'text/javascript; charset=utf-8', 'worker.min.js':'text/javascript; charset=utf-8',
+  'tesseract-core-lstm.wasm.js':'text/javascript; charset=utf-8', 'tesseract-core-lstm.wasm':'application/wasm',
+  'spa.traineddata.gz':'application/gzip'
 };
 
 export function createApp({filename=':memory:', store, ...options}={}) {
@@ -136,7 +142,8 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
       const changes = Object.values(state.changes).filter(c => coord || c.from === user.id || c.to === user.id);
       return {me:me(user), revision:state.revision,people:state.people,...schedule(state),
         drafts:coord ? Object.values(state.drafts).map(d => ({...d,errors:draftErrors(d,state.people)})) : [],
-        changes, notifications:state.notifications.filter(n => n.to === user.id),audit:coord ? state.audit : []};
+        changes, notifications:state.notifications.filter(n => n.to === user.id),audit:coord ? state.audit : [],
+        signupLink:coord && state.signupLink ? {expires:state.signupLink.expires,uses:state.signupLink.uses} : null};
     }
     if (path === '/notifications/read') {
       state.notifications.filter(n => n.to === user.id).forEach(n => {n.read=true;});
@@ -162,6 +169,18 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
       state.invites[hash(secret)] = {email,id,expires:Date.now()+86400000};
       log(state,user.id,'Invitación creada',id);
       return {token:secret,physicianId:id};
+    }
+    if (path === '/signup-link' || path === '/signup-link/revoke') {
+      requireThat(coord,403,'Solo coordinación puede gestionar el enlace de alta.');
+      if (path.endsWith('/revoke')) {
+        state.signupLink = null;
+        log(state,user.id,'Enlace de alta revocado',user.id);
+        return {};
+      }
+      const secret = token();
+      state.signupLink = {hash:hash(secret),expires:Date.now()+7*86400000,uses:0};
+      log(state,user.id,'Enlace de alta creado',user.id);
+      return {token:secret};
     }
     if (path.startsWith('/imports')) {
       requireThat(coord,403,'Solo coordinación puede importar.');
@@ -208,7 +227,8 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
           const k = key(row), old = state.assignments[k];
           if (old?.physicianId === row.physicianId) continue;
           changedKeys.add(k);
-          state.assignments[k] = {...row,version:(old?.version ?? 0)+1,protected:false};
+          const {sourceText, ...assignment} = row;
+          state.assignments[k] = {...assignment,version:(old?.version ?? 0)+1,protected:false};
         }
         const problem = validateRoster(Object.values(state.assignments));
         requireThat(!problem,422,problem);
@@ -279,7 +299,7 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
     res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     const json = (status,data) => {
       res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify(data));
@@ -292,6 +312,12 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
         const [file,mime] = staticFiles[path];
         res.writeHead(200,{'Content-Type':mime});
         return res.end(readFileSync(new URL('./public/'+file,import.meta.url)));
+      }
+      if (req.method === 'GET' && path.startsWith('/ocr/') && Object.hasOwn(ocrAssets,path.slice(5))) {
+        const file = path.slice(5);
+        const content = readFileSync(new URL('./public/ocr/'+file,import.meta.url));
+        res.writeHead(200,{'Content-Type':ocrAssets[file]});
+        return res.end(content);
       }
       requireThat(path.startsWith('/api/'),404,'No encontrado.');
       const action = path.slice(4);
@@ -323,7 +349,7 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
       }
       requireThat(body && typeof body === 'object' && !Array.isArray(body),400,'Se esperaba un objeto JSON.');
       requireThat(Buffer.byteLength(JSON.stringify(body)) <= 750000,413,'Archivo demasiado grande.');
-      if (['/login','/join','/demo','/setup','/profile/email','/profile/password'].includes(action)) {
+      if (['/login','/join','/register','/demo','/setup','/profile/email','/profile/password'].includes(action)) {
         const ip = req.socket.remoteAddress;
         const count = attempts.get(ip);
         if (!count || count.until < Date.now()) attempts.set(ip,{n:1,until:Date.now()+60000});
@@ -366,6 +392,25 @@ export function createHandler({store,demo=false,secure=false,setupHash}={}) {
           invite.used = true;
           state.users[user.id] = user;
           log(state,user.id,'Cuenta activada',user.id);
+          return signIn(state,user);
+        }
+        if (action === '/register') {
+          const link = state.signupLink;
+          requireThat(link && link.expires > Date.now() && typeof body.token === 'string' &&
+            timingSafeEqual(Buffer.from(hash(body.token)),Buffer.from(link.hash)),403,'El enlace de alta ha caducado o ya no está activo.');
+          const email = cleanEmail(body.email);
+          const name = typeof body.name === 'string' ? body.name.trim() : '';
+          requireThat(validEmail(email) && name && name.length <= 100,400,'Indica un nombre visible y un correo válido.');
+          requireThat(validPassword(body.password),400,'Usa entre 14 y 128 caracteres.');
+          const used = Object.values(state.users).some(u => u.email === email);
+          const reserved = Object.values(state.invites).some(i => i.email === email && !i.used && !i.revoked && i.expires > Date.now());
+          requireThat(!used && !reserved,409,'Ese correo ya tiene una cuenta o una invitación individual activa.');
+          const id = 'p-' + randomUUID();
+          state.people[id] = {id,name};
+          const user = {id,name,email,password:passwordHash(body.password),role:'doctor'};
+          state.users[id] = user;
+          link.uses++;
+          log(state,id,'Alta por enlace compartido',id);
           return signIn(state,user);
         }
         const user = identity(state,sessionId);
